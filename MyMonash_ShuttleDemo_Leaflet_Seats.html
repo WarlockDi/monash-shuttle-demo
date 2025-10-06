@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Monash Shuttle Demo — Leaflet (Seats + Stations)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#fff;color:#222;margin:0}
+  header{background:#006dae;color:#fff;padding:14px 16px}
+  h1{margin:0;font-size:18px}
+  main{max-width:980px;margin:0 auto;padding:14px 16px}
+  section{margin-bottom:16px}
+  #map{height:520px;border-radius:10px;border:1px solid #e5e7eb}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{border-bottom:1px solid #e5e7eb;padding:8px 6px;text-align:left;font-size:13px;vertical-align:middle}
+  th{background:#f7f7f7;color:#3c4043}
+  button{padding:6px 10px;border:none;border-radius:8px;background:#006dae;color:#fff;cursor:pointer}
+  button:hover{background:#004f7c}
+  .secondary{background:#fff;color:#222;border:1px solid #e5e7eb}
+  .secondary:hover{background:#f6f9fe}
+  .reserved{color:#0b6b39;font-weight:600}
+  .muted{color:#5f6368;font-size:12px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;font-size:12px}
+  .ok{background:#e7f5ec;color:#0b6b39}
+  .warn{background:#fff5e6;color:#8a5400}
+  .seat{font-weight:600}
+  .legend{margin-top:8px; font-size:12px; color:#444}
+  .legend table{width:auto}
+  .legend th,.legend td{border-bottom:none}
+</style>
+</head>
+<body>
+<header><h1>My Monash Shuttle Demo — Leaflet / OpenStreetMap（Seats & Station markers）</h1></header>
+<main>
+  <section>
+    <h2>Shuttle timetable — Southern Cross → Caulfield → Clayton</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <div>
+        <label class="muted">First departure (hour)</label>
+        <input type="number" id="firstHour" value="6" min="0" max="23">
+      </div>
+      <div>
+        <label class="muted">Last departure (hour)</label>
+        <input type="number" id="lastHour" value="22" min="0" max="23">
+      </div>
+      <div>
+        <label class="muted">Headway (minutes)</label>
+        <input type="number" id="headway" value="30" min="5" step="5">
+      </div>
+      <div>
+        <label class="muted">Simulation: spawn every (seconds) — 30min in real life</label>
+        <input type="number" id="spawnSec" value="10" min="3" step="1">
+      </div>
+      <div>
+        <label class="muted">Simulation: speed (progress per tick)</label>
+        <input type="number" id="speed" value="0.02" step="0.005" min="0.005">
+      </div>
+      <div style="align-self:flex-end"><button class="secondary" id="apply">Apply</button></div>
+    </div>
+    <table id="schedule"><thead><tr>
+      <th>#</th><th>Departure</th><th>Arrive (Clayton)</th><th>Seats</th><th>Status</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <div class="muted">Each bus has <strong>40 seats</strong>. You can reserve before the bus spawns; the bus will inherit your reservations.</div>
+  </section>
+
+  <section>
+    <h2>Live shuttle map (smooth multi-bus)</h2>
+    <div id="map"></div>
+    <div class="legend">
+      <table>
+        <tr><th align="left">Stations:&nbsp;</th>
+          <td>🟦 Southern Cross</td><td>🟨 Caulfield</td><td>🟥 Clayton</td>
+        </tr>
+        <tr><th align="left">Bus label:&nbsp;</th><td colspan="3">🚌 #ID — <span class="seat">SeatsLeft/40</span></td></tr>
+      </table>
+    </div>
+    <div class="muted" style="margin-top:6px">Buses loop: Southern Cross → Caulfield → Clayton → Southern Cross. Smooth animation; multiple buses spawn by the simulator.</div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+// ===== Helpers =====
+const pad = n => String(n).padStart(2,'0');
+const timeStr = (h,m=0) => pad(h)+":"+pad(m);
+function buildSchedule(firstHour,lastHour,headway){
+  const rows=[];
+  let i=0;
+  for(let h=firstHour; h<=lastHour; h++){
+    rows.push({idx:(i+1), dep: timeStr(h,0), arr: timeStr((h+1)%24,0), reservedCount:0, seatsTotal:40, busId:null});
+    i++;
+  }
+  return rows;
+}
+function renderSchedule(){
+  const tb=document.querySelector("#schedule tbody");
+  tb.innerHTML="";
+  schedule.forEach((r,i)=>{
+    const seatsLeft = r.seatsTotal - r.reservedCount;
+    const status = r.busId ? "On route (Bus #"+r.busId+")" : "Scheduled";
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${r.idx}</td><td>${r.dep}</td><td>${r.arr}</td>
+      <td class="seat">${seatsLeft}/${r.seatsTotal}</td>
+      <td>${status}</td>
+      <td>
+        <button ${seatsLeft<=0?'disabled':''}>${seatsLeft<=0?'Full':'Reserve Seat'}</button>
+      </td>`;
+    tr.querySelector("button").onclick=()=>{
+      if(r.reservedCount < r.seatsTotal){
+        r.reservedCount++;
+        // If bus already spawned, update its seats
+        if(r.busId && busesById[r.busId]){
+          busesById[r.busId].seatsLeft = r.seatsTotal - r.reservedCount;
+          updateBusIcon(busesById[r.busId]);
+        }
+        renderSchedule();
+      }
+    };
+    tb.appendChild(tr);
+  });
+}
+
+// ===== Map & route =====
+const route = [
+  {lat:-37.8183,lng:144.9526, name:"Southern Cross", color:"#1e3a8a"}, // blue
+  {lat:-37.8770,lng:145.0420, name:"Caulfield",      color:"#b45309"}, // amber
+  {lat:-37.9110,lng:145.1340, name:"Clayton",        color:"#b91c1c"}  // red
+];
+
+const map = L.map('map', { zoomControl: true });
+const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+const poly = L.polyline(route.map(p=>({lat:p.lat,lng:p.lng})), {color:'#006dae', weight:5, opacity:0.9}).addTo(map);
+map.fitBounds(poly.getBounds(), {padding:[20,20]});
+
+// Station markers with labels
+route.forEach((p)=>{
+  const m = L.circleMarker([p.lat,p.lng], {radius:8, color:p.color, fillColor:p.color, fillOpacity:0.9}).addTo(map);
+  m.bindTooltip(p.name, {permanent:true, direction:'right', offset:[8,0], opacity:0.9});
+});
+
+// Distances for animation
+function dist(a,b){ return map.distance([a.lat,a.lng],[b.lat,b.lng]); }
+const segments = [];
+let totalLen = 0;
+for(let i=0;i<route.length-1;i++){
+  const a=route[i], b=route[i+1];
+  const len=dist(a,b);
+  segments.push({a,b,len});
+  totalLen += len;
+}
+const cumul = [];
+let acc=0;
+for(const s of segments){ cumul.push({start:acc, end:acc+s.len, ...s}); acc+=s.len; }
+function pointAt(t){ // t in [0,1] along SC→Caulfield→Clayton
+  const d = t * totalLen;
+  let seg = cumul[0];
+  for(const s of cumul){ if(d<=s.end){ seg=s; break; } }
+  const segPos = (d - seg.start) / seg.len;
+  const lat = seg.a.lat + (seg.b.lat - seg.a.lat) * segPos;
+  const lng = seg.a.lng + (seg.b.lng - seg.a.lng) * segPos;
+  return {lat,lng};
+}
+
+// ===== Shuttle simulation with seats =====
+function busIconHTML(label, seatsLeft){
+  return `<div style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #e5e7eb;border-radius:999px;padding:4px 8px;box-shadow:0 1px 3px rgba(0,0,0,.1)">
+    <span style="font-size:16px">🚌</span><span style="font-size:12px;color:#111">#${label}</span>
+    <span style="font-size:12px;color:#0b6b39;font-weight:700">${seatsLeft}/40</span>
+  </div>`;
+}
+function makeBusIcon(label, seatsLeft){
+  return L.divIcon({ className:'bus-icon', html: busIconHTML(label, seatsLeft), iconSize:[70,26], iconAnchor:[35,13] });
+}
+function updateBusIcon(bus){
+  bus.marker.setIcon(makeBusIcon(bus.id, bus.seatsLeft));
+}
+
+let nextBusId=1;
+const buses = [];       // array of bus objects
+const busesById = {};   // id -> bus
+let speed = parseFloat(document.getElementById('speed').value||0.02);
+let spawnSec = parseInt(document.getElementById('spawnSec').value||10,10);
+
+// Link spawns to schedule rows in order
+let spawnIndex = 0; // which schedule row to assign next
+function spawnBus(){
+  const id = nextBusId++;
+  // Determine associated schedule row
+  const row = schedule[spawnIndex % schedule.length];
+  spawnIndex++;
+
+  const seatsTotal = row.seatsTotal;
+  const preBooked = row.reservedCount;
+  const seatsLeft = Math.max(0, seatsTotal - preBooked);
+
+  const marker = L.marker(pointAt(0), {icon: makeBusIcon(id, seatsLeft)}).addTo(map);
+  const bus = { id, t:0, dir:+1, marker, seatsLeft, seatsTotal, scheduleRow: row };
+  buses.push(bus);
+  busesById[id] = bus;
+
+  // mark row as spawned/busId
+  row.busId = id;
+  renderSchedule();
+}
+
+function tick(){
+  for(const b of buses){
+    b.t += b.dir * speed;
+    if(b.t>1){ b.t=1; b.dir=-1; }
+    if(b.t<0){ b.t=0; b.dir=+1; }
+    b.marker.setLatLng(pointAt(b.t));
+  }
+}
+
+// ===== UI Apply / Schedule =====
+function rebuildSchedule(){
+  const first = parseInt(document.getElementById('firstHour').value||6,10);
+  const last  = parseInt(document.getElementById('lastHour').value||22,10);
+  const hw    = parseInt(document.getElementById('headway').value||30,10);
+  schedule = buildSchedule(first,last,hw);
+  spawnIndex = 0;
+  renderSchedule();
+}
+
+document.getElementById('apply').addEventListener('click', ()=>{
+  // update sim params
+  speed = parseFloat(document.getElementById('speed').value||0.02);
+  spawnSec = parseInt(document.getElementById('spawnSec').value||10,10);
+
+  // rebuild schedule (keeps current pre-bookings by resetting; could be extended to preserve if desired)
+  rebuildSchedule();
+
+  // clear existing buses
+  buses.forEach(b=> map.removeLayer(b.marker));
+  buses.length = 0;
+  for(const k in busesById) delete busesById[k];
+});
+
+// initial schedule
+let schedule = buildSchedule(6,22,30);
+renderSchedule();
+
+// start simulation
+spawnBus(); // first bus immediately
+let tickTimer = setInterval(tick, 1000); // smooth per second
+let spawnTimer = setInterval(spawnBus, spawnSec*1000);
+</script>
+</body>
+</html>
